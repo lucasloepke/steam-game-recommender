@@ -15,7 +15,7 @@ from .baselines import evaluate_recommendations
 
 @dataclass
 class MatrixFactorizationSGD:
-    """Matrix factorization model trained with SGD."""
+    #Matrix factorization model trained with SGD.
 
     k: int = 50
     reg: float = 0.01
@@ -30,7 +30,6 @@ class MatrixFactorizationSGD:
         self.Q: np.ndarray | None = None
 
     def fit(self, matrix: csr_matrix, verbose: bool = True) -> "MatrixFactorizationSGD":
-        """SGD on observed entries; shuffled epochs, chunked by ``fit_batch_size``."""
         m, n = matrix.shape
         rng = np.random.default_rng(self.random_state)
         self.P = 0.01 * rng.standard_normal((m, self.k))
@@ -64,11 +63,29 @@ class MatrixFactorizationSGD:
                     errors[:, None] * self.P[r] - self.reg * self.Q[c]
                 )
 
-                delta_p = np.clip(delta_p, -1.0, 1.0)
-                delta_q = np.clip(delta_q, -1.0, 1.0)
+                # FIX 1: Use norm-based gradient clipping instead of hard ±1.0 clip.
+                # The original ±1.0 hard clip was too aggressive relative to the
+                # 0.01-scale initialization and was suppressing the gradient signal.
+                max_norm = 5.0
+                dp_norm = np.linalg.norm(delta_p)
+                if dp_norm > max_norm:
+                    delta_p = delta_p * (max_norm / dp_norm)
+                dq_norm = np.linalg.norm(delta_q)
+                if dq_norm > max_norm:
+                    delta_q = delta_q * (max_norm / dq_norm)
 
-                np.add.at(self.P, r, delta_p)
-                np.add.at(self.Q, c, delta_q)
+                # FIX 2: Accumulate updates per unique index to avoid slow np.add.at
+                # on repeated indices. Group delta_p rows by user index and sum them,
+                # then apply a single indexed addition per unique user.
+                unique_r, inv_r = np.unique(r, return_inverse=True)
+                p_updates = np.zeros((len(unique_r), self.k), dtype=np.float64)
+                np.add.at(p_updates, inv_r, delta_p)
+                self.P[unique_r] += p_updates
+
+                unique_c, inv_c = np.unique(c, return_inverse=True)
+                q_updates = np.zeros((len(unique_c), self.k), dtype=np.float64)
+                np.add.at(q_updates, inv_c, delta_q)
+                self.Q[unique_c] += q_updates
 
             if np.isnan(self.P).any():
                 print(
@@ -80,23 +97,24 @@ class MatrixFactorizationSGD:
         return self
 
     def recommend_user(self, user_idx: int, train_matrix: csr_matrix, k: int = 10) -> List[int]:
-        """Recommend top-K unseen item indices for a user index."""
+        """Recommend top-K unseen item indices for a user index.
+
+        FIX 3: Uses vectorized masking instead of a Python set comprehension,
+        which is significantly faster for large item catalogs.
+        """
         if self.P is None or self.Q is None:
             raise ValueError("Model must be fitted before calling recommend_user.")
 
-        user_vector = self.P[user_idx]
-        scores = self.Q @ user_vector
+        scores = self.Q @ self.P[user_idx]
 
-        seen_items = set(train_matrix[user_idx].indices.tolist())
-        candidate_indices = [idx for idx in range(train_matrix.shape[1]) if idx not in seen_items]
-        if not candidate_indices:
-            return []
+        # Mask already-seen items with -inf so they are never selected
+        seen_items = train_matrix[user_idx].indices
+        scores[seen_items] = -np.inf
 
-        candidate_scores = scores[candidate_indices]
-        top_k = min(k, len(candidate_indices))
-        top_local = np.argpartition(-candidate_scores, top_k - 1)[:top_k]
-        sorted_local = top_local[np.argsort(-candidate_scores[top_local])]
-        return [int(candidate_indices[i]) for i in sorted_local]
+        top_k = min(k, int((scores != -np.inf).sum()))
+        top_indices = np.argpartition(-scores, top_k - 1)[:top_k]
+        sorted_indices = top_indices[np.argsort(-scores[top_indices])]
+        return sorted_indices.tolist()
 
 
 def build_test_items_by_user(
@@ -104,14 +122,15 @@ def build_test_items_by_user(
     user_to_idx: Dict[int, int],
     game_to_idx: Dict[int, int],
 ) -> Dict[int, Sequence[int]]:
-    """Convert leave-one-out test rows into user-indexed item-index targets."""
-    out: Dict[int, Sequence[int]] = {}
-    for _, row in test_df.iterrows():
-        user_id = int(row["user_id"])
-        game_id = int(row["app_id"])
-        if user_id in user_to_idx and game_id in game_to_idx:
-            out[user_to_idx[user_id]] = [game_to_idx[game_id]]
-    return out
+    #Convert leave-one-out test rows into user-indexed item-index targets.
+
+    
+    df = test_df[
+        test_df["user_id"].isin(user_to_idx) & test_df["app_id"].isin(game_to_idx)
+    ].copy()
+    df["user_idx"] = df["user_id"].map(user_to_idx)
+    df["game_idx"] = df["app_id"].map(game_to_idx)
+    return df.groupby("user_idx")["game_idx"].apply(list).to_dict()
 
 
 def evaluate_mf_leave_one_out(
@@ -120,9 +139,8 @@ def evaluate_mf_leave_one_out(
     test_items_by_user: Dict[int, Sequence[int]],
     k: int = 10,
 ) -> Dict[str, float]:
-    """Evaluate matrix factorization model with Precision@K and Recall@K."""
+    #Evaluate matrix factorization model with Precision@K and Recall@K.
     predictions: Dict[int, Sequence[int]] = {}
     for user_idx in test_items_by_user:
         predictions[user_idx] = model.recommend_user(user_idx, train_matrix, k=k)
     return evaluate_recommendations(predictions, test_items_by_user, k=k)
-

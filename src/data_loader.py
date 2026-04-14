@@ -13,7 +13,7 @@ from scipy.sparse import csr_matrix
 
 @dataclass
 class InteractionData:
-    """Container for sparse interaction matrices and id mappings."""
+    #Container for sparse interaction matrices and id mappings.
 
     binary_matrix: csr_matrix
     hours_matrix: csr_matrix
@@ -25,7 +25,7 @@ class InteractionData:
 
 
 def load_steam_data(data_dir: str | Path) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Load recommendations, games, and users CSV files from a data directory."""
+    #Load recommendations, games, and users CSV files from data directory
     data_path = Path(data_dir)
     recs = pd.read_csv(data_path / "recommendations.csv")
     games = pd.read_csv(data_path / "games.csv")
@@ -38,7 +38,7 @@ def filter_recommendations(
     min_user_reviews: int = 5,
     min_game_reviews: int = 50,
 ) -> pd.DataFrame:
-    """Filter interactions to users and games with enough review activity."""
+    #Filter interactions to users and games with enough review activity.
     df = recommendations.copy()
 
     user_counts = df["user_id"].value_counts()
@@ -60,19 +60,19 @@ def filter_recommendations(
 
 
 def build_interaction_matrices(interactions: pd.DataFrame) -> InteractionData:
-    """Build sparse user--game matrices from interactions.
+    #Build sparse user--game matrices from interactions.
 
-    - ``binary_matrix``: ``is_recommended`` as stored values (0/1) for every row.
-    - ``hours_matrix``: ``log1p(hours)`` for every row.
-    - ``positive_matrix``: only rows with ``is_recommended == 1``, values ``1.0``.
-    """
-    users = interactions["user_id"].drop_duplicates().to_numpy()
-    games = interactions["app_id"].drop_duplicates().to_numpy()
+    # - ``binary_matrix``: ``is_recommended`` as stored values (0/1) for every row.
+    # - ``hours_matrix``: ``log1p(hours)`` for every row.
+    # - ``positive_matrix``: only rows with ``is_recommended == 1``, values ``1.0``.
+
+    users = np.unique(interactions["user_id"].to_numpy())
+    games = np.unique(interactions["app_id"].to_numpy())
 
     user_to_idx = {int(uid): idx for idx, uid in enumerate(users)}
     game_to_idx = {int(gid): idx for idx, gid in enumerate(games)}
-    idx_to_user = {idx: uid for uid, idx in user_to_idx.items()}
-    idx_to_game = {idx: gid for gid, idx in game_to_idx.items()}
+    idx_to_user = {idx: int(uid) for uid, idx in user_to_idx.items()}
+    idx_to_game = {idx: int(gid) for gid, idx in game_to_idx.items()}
 
     rows = interactions["user_id"].map(user_to_idx).to_numpy(dtype=np.int64)
     cols = interactions["app_id"].map(game_to_idx).to_numpy(dtype=np.int64)
@@ -101,7 +101,7 @@ def build_interaction_matrices(interactions: pd.DataFrame) -> InteractionData:
 
 
 def compute_dataset_statistics(matrix: csr_matrix) -> Dict[str, float]:
-    """Compute number of users, games, interactions, and sparsity."""
+    # Compute number of users, games, interactions, and sparsity.
     m, n = matrix.shape
     nnz = int(matrix.nnz)
     sparsity = 1.0 - (nnz / float(m * n))
@@ -109,7 +109,7 @@ def compute_dataset_statistics(matrix: csr_matrix) -> Dict[str, float]:
 
 
 def print_dataset_statistics(matrix: csr_matrix, title: str = "Dataset statistics") -> None:
-    """Print formatted summary statistics for a sparse interaction matrix."""
+    #Print formatted summary statistics for a sparse interaction matrix.
     stats = compute_dataset_statistics(matrix)
     print(f"{title}:")
     print(f"  Users (m): {stats['users']:,}")
@@ -122,13 +122,16 @@ def leave_one_out_split(
     interactions: pd.DataFrame,
     time_col: str = "date",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Hold out each user's most recent interaction as test and keep the rest for train."""
+    #Hold out each user's most recent *positive* interaction as test.
+
     df = interactions.copy()
     df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
     df = df.sort_values(["user_id", time_col]).reset_index(drop=True)
 
-    test_idx = df.groupby("user_id").tail(1).index
+    # Only hold out from rows where the user actually recommended the game.
+    positive_df = df[df["is_recommended"] == 1]
+    test_idx = positive_df.groupby("user_id").tail(1).index
+
     test_df = df.loc[test_idx].reset_index(drop=True)
     train_df = df.drop(index=test_idx).reset_index(drop=True)
     return train_df, test_df
-
