@@ -1,4 +1,4 @@
-"""SGD-based matrix factorization for collaborative filtering."""
+"""SGD-based and ALS-based matrix factorization for collaborative filtering."""
 
 from __future__ import annotations
 
@@ -9,20 +9,20 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix
 from tqdm import trange
+import implicit
 
 from .baselines import evaluate_recommendations
 
 
 @dataclass
 class MatrixFactorizationSGD:
-    #Matrix factorization model trained with SGD.
+    """Matrix factorization model trained with SGD."""
 
     k: int = 50
     reg: float = 0.01
     learning_rate: float = 0.0005
     epochs: int = 20
     random_state: int = 42
-    # Max observed pairs per vectorized chunk (None = one pass over all pairs; may use a lot of RAM).
     fit_batch_size: int | None = 500_000
 
     def __post_init__(self) -> None:
@@ -30,6 +30,7 @@ class MatrixFactorizationSGD:
         self.Q: np.ndarray | None = None
 
     def fit(self, matrix: csr_matrix, verbose: bool = True) -> "MatrixFactorizationSGD":
+        """SGD on observed entries; shuffled epochs, chunked by fit_batch_size."""
         m, n = matrix.shape
         rng = np.random.default_rng(self.random_state)
         self.P = 0.01 * rng.standard_normal((m, self.k))
@@ -63,9 +64,6 @@ class MatrixFactorizationSGD:
                     errors[:, None] * self.P[r] - self.reg * self.Q[c]
                 )
 
-                # FIX 1: Use norm-based gradient clipping instead of hard ±1.0 clip.
-                # The original ±1.0 hard clip was too aggressive relative to the
-                # 0.01-scale initialization and was suppressing the gradient signal.
                 max_norm = 5.0
                 dp_norm = np.linalg.norm(delta_p)
                 if dp_norm > max_norm:
@@ -74,9 +72,6 @@ class MatrixFactorizationSGD:
                 if dq_norm > max_norm:
                     delta_q = delta_q * (max_norm / dq_norm)
 
-                # FIX 2: Accumulate updates per unique index to avoid slow np.add.at
-                # on repeated indices. Group delta_p rows by user index and sum them,
-                # then apply a single indexed addition per unique user.
                 unique_r, inv_r = np.unique(r, return_inverse=True)
                 p_updates = np.zeros((len(unique_r), self.k), dtype=np.float64)
                 np.add.at(p_updates, inv_r, delta_p)
@@ -88,26 +83,75 @@ class MatrixFactorizationSGD:
                 self.Q[unique_c] += q_updates
 
             if np.isnan(self.P).any():
-                print(
-                    "Warning: NaN detected in user factors (P) after an epoch; "
-                    "stopping matrix factorization training early."
-                )
+                print("Warning: NaN detected in P; stopping early.")
                 break
 
         return self
 
     def recommend_user(self, user_idx: int, train_matrix: csr_matrix, k: int = 10) -> List[int]:
-        """Recommend top-K unseen item indices for a user index.
-
-        FIX 3: Uses vectorized masking instead of a Python set comprehension,
-        which is significantly faster for large item catalogs.
-        """
+        """Recommend top-K unseen item indices for a user index."""
         if self.P is None or self.Q is None:
             raise ValueError("Model must be fitted before calling recommend_user.")
 
         scores = self.Q @ self.P[user_idx]
+        seen_items = train_matrix[user_idx].indices
+        scores[seen_items] = -np.inf
 
-        # Mask already-seen items with -inf so they are never selected
+        top_k = min(k, int((scores != -np.inf).sum()))
+        top_indices = np.argpartition(-scores, top_k - 1)[:top_k]
+        sorted_indices = top_indices[np.argsort(-scores[top_indices])]
+        return sorted_indices.tolist()
+
+
+class MatrixFactorizationALS:
+    """ALS matrix factorization using the implicit library.
+
+    We bypass implicit's recommend() method entirely because it has confusing
+    orientation requirements. Instead we extract the learned user and item
+    factor matrices directly and do scoring ourselves — same math, no confusion.
+
+    implicit.fit() expects item x user (games x users), so we pass matrix.T.
+    After fitting:
+      - model.user_factors has shape (n_games, k)  [implicit calls items "users"]
+      - model.item_factors has shape (n_users, k)  [implicit calls users "items"]
+    So we swap them: our user factors = model.item_factors,
+                     our item factors = model.user_factors.
+    """
+
+    def __init__(self, k: int = 50, reg: float = 0.01, iterations: int = 50, random_state: int = 42):
+        self.k = k
+        self.reg = reg
+        self.iterations = iterations
+        self.random_state = random_state
+        self.model = implicit.als.AlternatingLeastSquares(
+            factors=k,
+            regularization=reg,
+            iterations=iterations,
+            random_state=random_state,
+        )
+        self.user_factors: np.ndarray | None = None  # shape: (n_users, k)
+        self.item_factors: np.ndarray | None = None  # shape: (n_items, k)
+
+    def fit(self, matrix: csr_matrix, verbose: bool = True) -> "MatrixFactorizationALS":
+        """Fit ALS model. matrix must be users x items."""
+        # implicit expects item x user, so we pass the transpose
+        item_user = csr_matrix(matrix.T)
+        self.model.fit(item_user, show_progress=verbose)
+        # implicit swaps naming: what it calls "user_factors" are actually item factors
+        # and what it calls "item_factors" are actually user factors.
+        self.user_factors = np.array(self.model.item_factors)  # (n_users, k)
+        self.item_factors = np.array(self.model.user_factors)  # (n_items, k)
+        return self
+
+    def recommend_user(self, user_idx: int, train_matrix: csr_matrix, k: int = 10) -> List[int]:
+        """Recommend top-K unseen items by scoring directly with factor matrices."""
+        if self.user_factors is None or self.item_factors is None:
+            raise ValueError("Model must be fitted before calling recommend_user.")
+
+        # Score all items for this user
+        scores = self.item_factors @ self.user_factors[user_idx]
+
+        # Mask seen items
         seen_items = train_matrix[user_idx].indices
         scores[seen_items] = -np.inf
 
@@ -122,9 +166,7 @@ def build_test_items_by_user(
     user_to_idx: Dict[int, int],
     game_to_idx: Dict[int, int],
 ) -> Dict[int, Sequence[int]]:
-    #Convert leave-one-out test rows into user-indexed item-index targets.
-
-    
+    """Convert leave-one-out test rows into user-indexed item-index targets."""
     df = test_df[
         test_df["user_id"].isin(user_to_idx) & test_df["app_id"].isin(game_to_idx)
     ].copy()
@@ -134,12 +176,12 @@ def build_test_items_by_user(
 
 
 def evaluate_mf_leave_one_out(
-    model: MatrixFactorizationSGD,
+    model,
     train_matrix: csr_matrix,
     test_items_by_user: Dict[int, Sequence[int]],
     k: int = 10,
 ) -> Dict[str, float]:
-    #Evaluate matrix factorization model with Precision@K and Recall@K.
+    """Evaluate a model with Precision@K and Recall@K."""
     predictions: Dict[int, Sequence[int]] = {}
     for user_idx in test_items_by_user:
         predictions[user_idx] = model.recommend_user(user_idx, train_matrix, k=k)
