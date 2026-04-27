@@ -98,6 +98,8 @@ class MatrixFactorizationSGD:
         scores[seen_items] = -np.inf
 
         top_k = min(k, int((scores != -np.inf).sum()))
+        if top_k <= 0:
+            return []
         top_indices = np.argpartition(-scores, top_k - 1)[:top_k]
         sorted_indices = top_indices[np.argsort(-scores[top_indices])]
         return sorted_indices.tolist()
@@ -156,6 +158,8 @@ class MatrixFactorizationALS:
         scores[seen_items] = -np.inf
 
         top_k = min(k, int((scores != -np.inf).sum()))
+        if top_k <= 0:
+            return []
         top_indices = np.argpartition(-scores, top_k - 1)[:top_k]
         sorted_indices = top_indices[np.argsort(-scores[top_indices])]
         return sorted_indices.tolist()
