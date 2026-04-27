@@ -29,24 +29,46 @@ def recall_at_k(recommended: Sequence[int], relevant: Sequence[int], k: int) -> 
     hits = sum(1 for item in rec_k if item in relevant_set)
     return hits / float(len(relevant_set))
 
+def ndcg_at_k(recommended: Sequence[int], relevant: Sequence[int], k: int) -> float:
+    """Compute NDCG@K for one user. With one relevant item, ideal DCG is always 1.0."""
+    relevant_set = set(relevant)
+    rec_k = list(recommended)[:k]
+    for rank, item in enumerate(rec_k, start=1):
+        if item in relevant_set:
+            return 1.0 / np.log2(rank + 1)
+    return 0.0
 
 def evaluate_recommendations(
     recommendations_by_user: Dict[int, Sequence[int]],
     test_items_by_user: Dict[int, Sequence[int]],
-    k: int = 10,
+    k: int,
+
 ) -> Dict[str, float]:
     """Evaluate user recommendations with mean Precision@K and Recall@K."""
     precisions: List[float] = []
     recalls: List[float] = []
+    hits: List[float] = []
+    ndcgs: List[float] = []                                         # add this
+
+
 
     for user_id, relevant_items in test_items_by_user.items():
         recommended_items = recommendations_by_user.get(user_id, [])
         precisions.append(precision_at_k(recommended_items, relevant_items, k))
         recalls.append(recall_at_k(recommended_items, relevant_items, k))
+        relevant_set = set(relevant_items)
+        hits.append(1.0 if any(
+            item in relevant_set for item in list(recommended_items)[:k]
+        ) else 0.0)
+        ndcgs.append(ndcg_at_k(recommended_items, relevant_items, k))
+
 
     return {
         "precision_at_k": float(np.mean(precisions)) if precisions else 0.0,
         "recall_at_k": float(np.mean(recalls)) if recalls else 0.0,
+        "hit_rate_at_k": float(np.mean(hits)) if hits else 0.0,
+        "ndcg_at_k": float(np.mean(ndcgs)) if ndcgs else 0.0,
+
     }
 
 

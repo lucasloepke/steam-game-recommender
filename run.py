@@ -1,16 +1,3 @@
-"""
-Steam Game Recommender — Final Evaluation
-==========================================
-Best model: ALS (k=200, reg=0.01, iterations=50)
-Trained on log1p(hours_played) implicit feedback signal.
-
-Results vs baselines:
-  - ALS (k=200): precision@10 ~0.0086  (+281% over popularity)
-  - SGD (k=50):  precision@10 ~0.0028  (+23%  over popularity)
-  - Popularity:  precision@10 ~0.0023
-  - Random:      precision@10 ~0.0008
-"""
-
 import pandas as pd
 import sys
 from pathlib import Path
@@ -41,49 +28,57 @@ all_game_ids = sorted(train_df['app_id'].unique().tolist())
 test_items_by_user_id = test_df.groupby('user_id')['app_id'].apply(list).to_dict()
 test_items_by_user_idx = build_test_items_by_user(test_df, train_data.user_to_idx, train_data.game_to_idx)
 
-k_eval = 10
 results = []
 
 # ── Baselines ──────────────────────────────────────────────────────────────────
 print('\nRunning baselines...')
 
-pop_recs = popularity_recommendations(train_df, user_ids=user_ids, k=k_eval)
-pop_scores = evaluate_recommendations(pop_recs, test_items_by_user_id, k=k_eval)
-results.append({'model': 'Popularity', 'precision@10': pop_scores['precision_at_k'], 'recall@10': pop_scores['recall_at_k']})
-print(f"  Popularity  -> precision@10: {pop_scores['precision_at_k']:.6f}")
+pop_recs = popularity_recommendations(train_df, user_ids=user_ids, k=20)
+pop_10 = evaluate_recommendations(pop_recs, test_items_by_user_id, k=10)
+pop_20 = evaluate_recommendations(pop_recs, test_items_by_user_id, k=20)
+results.append({'model': 'Popularity', 'hit_rate@10': pop_10['hit_rate_at_k'], 'hit_rate@20': pop_20['hit_rate_at_k'], 'ndcg@10': pop_10['ndcg_at_k'], 'ndcg@20': pop_20['ndcg_at_k']})
+print(f"  Popularity  -> hit_rate@10: {pop_10['hit_rate_at_k']:.6f}  hit_rate@20: {pop_20['hit_rate_at_k']:.6f}  ndcg@10: {pop_10['ndcg_at_k']:.6f}  ndcg@20: {pop_20['ndcg_at_k']:.6f}")
 
-rand_recs = random_recommendations(train_df, user_ids=user_ids, all_game_ids=all_game_ids, k=k_eval, seed=42)
-rand_scores = evaluate_recommendations(rand_recs, test_items_by_user_id, k=k_eval)
-results.append({'model': 'Random', 'precision@10': rand_scores['precision_at_k'], 'recall@10': rand_scores['recall_at_k']})
-print(f"  Random      -> precision@10: {rand_scores['precision_at_k']:.6f}")
+rand_recs = random_recommendations(train_df, user_ids=user_ids, all_game_ids=all_game_ids, k=20, seed=42)
+rand_10 = evaluate_recommendations(rand_recs, test_items_by_user_id, k=10)
+rand_20 = evaluate_recommendations(rand_recs, test_items_by_user_id, k=20)
+results.append({'model': 'Random', 'hit_rate@10': rand_10['hit_rate_at_k'], 'hit_rate@20': rand_20['hit_rate_at_k'], 'ndcg@10': rand_10['ndcg_at_k'], 'ndcg@20': rand_20['ndcg_at_k']})
+print(f"  Random      -> hit_rate@10: {rand_10['hit_rate_at_k']:.6f}  hit_rate@20: {rand_20['hit_rate_at_k']:.6f}  ndcg@10: {rand_10['ndcg_at_k']:.6f}  ndcg@20: {rand_20['ndcg_at_k']:.6f}")
 
-# ── SGD baseline (for comparison) ─────────────────────────────────────────────
+# ── SGD (for comparison) ───────────────────────────────────────────────────────
 print('\nTraining SGD (k=50) for comparison...')
 sgd = MatrixFactorizationSGD(k=50, reg=0.01, learning_rate=0.005, epochs=50, random_state=42)
 sgd.fit(train_data.hours_matrix, verbose=True)
-sgd_scores = evaluate_mf_leave_one_out(sgd, train_data.hours_matrix, test_items_by_user_idx, k=k_eval)
-results.append({'model': 'SGD (k=50)', 'precision@10': sgd_scores['precision_at_k'], 'recall@10': sgd_scores['recall_at_k']})
-print(f"  SGD (k=50)  -> precision@10: {sgd_scores['precision_at_k']:.6f}")
+sgd_10 = evaluate_mf_leave_one_out(sgd, train_data.hours_matrix, test_items_by_user_idx, k=10)
+sgd_20 = evaluate_mf_leave_one_out(sgd, train_data.hours_matrix, test_items_by_user_idx, k=20)
+results.append({'model': 'SGD (k=50)', 'hit_rate@10': sgd_10['hit_rate_at_k'], 'hit_rate@20': sgd_20['hit_rate_at_k'], 'ndcg@10': sgd_10['ndcg_at_k'], 'ndcg@20': sgd_20['ndcg_at_k']})
+print(f"  SGD (k=50)  -> hit_rate@10: {sgd_10['hit_rate_at_k']:.6f}  hit_rate@20: {sgd_20['hit_rate_at_k']:.6f}  ndcg@10: {sgd_10['ndcg_at_k']:.6f}  ndcg@20: {sgd_20['ndcg_at_k']:.6f}")
 
 # ── Best model: ALS k=200 ──────────────────────────────────────────────────────
 print('\nTraining best model: ALS (k=200)...')
 als = MatrixFactorizationALS(k=200, reg=0.01, iterations=50, random_state=42)
 als.fit(train_data.hours_matrix, verbose=True)
-als_scores = evaluate_mf_leave_one_out(als, train_data.hours_matrix, test_items_by_user_idx, k=k_eval)
-results.append({'model': 'ALS (k=200)', 'precision@10': als_scores['precision_at_k'], 'recall@10': als_scores['recall_at_k']})
-print(f"  ALS (k=200) -> precision@10: {als_scores['precision_at_k']:.6f}")
+als_10 = evaluate_mf_leave_one_out(als, train_data.hours_matrix, test_items_by_user_idx, k=10)
+als_20 = evaluate_mf_leave_one_out(als, train_data.hours_matrix, test_items_by_user_idx, k=20)
+results.append({'model': 'ALS (k=200)', 'hit_rate@10': als_10['hit_rate_at_k'], 'hit_rate@20': als_20['hit_rate_at_k'], 'ndcg@10': als_10['ndcg_at_k'], 'ndcg@20': als_20['ndcg_at_k']})
+print(f"  ALS (k=200) -> hit_rate@10: {als_10['hit_rate_at_k']:.6f}  hit_rate@20: {als_20['hit_rate_at_k']:.6f}  ndcg@10: {als_10['ndcg_at_k']:.6f}  ndcg@20: {als_20['ndcg_at_k']:.6f}")
 
 # ── Final results ──────────────────────────────────────────────────────────────
-results_df = pd.DataFrame(results).sort_values('precision@10', ascending=False).reset_index(drop=True)
+results_df = pd.DataFrame(results).sort_values('hit_rate@10', ascending=False).reset_index(drop=True)
+results_df = results_df[['model', 'hit_rate@10', 'hit_rate@20', 'ndcg@10', 'ndcg@20']]
 print()
-print('=' * 50)
+print('=' * 70)
 print('FINAL RESULTS')
-print('=' * 50)
+print('=' * 70)
 print(results_df.to_string())
 
-pop_precision = results_df[results_df['model'] == 'Popularity']['precision@10'].values[0]
+pop_hr_10  = results_df[results_df['model'] == 'Popularity']['hit_rate@10'].values[0]
+pop_hr_20  = results_df[results_df['model'] == 'Popularity']['hit_rate@20'].values[0]
+pop_ndcg_10 = results_df[results_df['model'] == 'Popularity']['ndcg@10'].values[0]
+pop_ndcg_20 = results_df[results_df['model'] == 'Popularity']['ndcg@20'].values[0]
 best = results_df.iloc[0]
-improvement = (best['precision@10'] - pop_precision) / pop_precision * 100
-print(f"\nBest model:                  {best['model']}")
-print(f"Best precision@10:           {best['precision@10']:.6f}")
-print(f"Improvement over popularity: +{improvement:.1f}%")
+print(f"\nBest model:                              {best['model']}")
+print(f"hit_rate@10 improvement over popularity: +{(best['hit_rate@10'] - pop_hr_10)   / pop_hr_10   * 100:.1f}%")
+print(f"hit_rate@20 improvement over popularity: +{(best['hit_rate@20'] - pop_hr_20)   / pop_hr_20   * 100:.1f}%")
+print(f"ndcg@10     improvement over popularity: +{(best['ndcg@10']     - pop_ndcg_10) / pop_ndcg_10 * 100:.1f}%")
+print(f"ndcg@20     improvement over popularity: +{(best['ndcg@20']     - pop_ndcg_20) / pop_ndcg_20 * 100:.1f}%")
